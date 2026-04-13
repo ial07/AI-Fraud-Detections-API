@@ -80,9 +80,15 @@ class DashboardController extends Controller
         $period = $request->get('period', 'daily');
         $days = (int) $request->get('days', 7);
 
+        $driver = DB::connection()->getDriverName();
+
         if ($period === 'hourly') {
+            $periodExpr = $driver === 'sqlite'
+                ? "strftime('%Y-%m-%d %H:00', created_at)"
+                : "DATE_FORMAT(created_at, '%Y-%m-%d %H:00')";
+
             $trends = Transaction::select(
-                DB::raw('DATE_FORMAT(created_at, "%Y-%m-%d %H:00") as period'),
+                DB::raw("$periodExpr as period"),
                 DB::raw('COUNT(*) as total'),
                 DB::raw('SUM(CASE WHEN is_flagged = 1 THEN 1 ELSE 0 END) as flagged'),
             )
@@ -91,8 +97,12 @@ class DashboardController extends Controller
                 ->orderBy('period')
                 ->get();
         } else {
+            $periodExpr = $driver === 'sqlite'
+                ? "date(created_at)"
+                : "DATE(created_at)";
+
             $trends = Transaction::select(
-                DB::raw('DATE(created_at) as period'),
+                DB::raw("$periodExpr as period"),
                 DB::raw('COUNT(*) as total'),
                 DB::raw('SUM(CASE WHEN is_flagged = 1 THEN 1 ELSE 0 END) as flagged'),
             )
