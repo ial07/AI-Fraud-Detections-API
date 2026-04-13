@@ -19,6 +19,9 @@ class Transaction extends Model
         'device_type',
         'ip_address',
         'risk_score',
+        'ai_risk_score',
+        'ai_confidence',
+        'fraud_type',
         'risk_level',
         'is_flagged',
         'is_simulated',
@@ -33,6 +36,8 @@ class Transaction extends Model
         return [
             'amount' => 'decimal:2',
             'risk_score' => 'decimal:2',
+            'ai_risk_score' => 'decimal:2',
+            'ai_confidence' => 'decimal:2',
             'is_flagged' => 'boolean',
             'is_simulated' => 'boolean',
         ];

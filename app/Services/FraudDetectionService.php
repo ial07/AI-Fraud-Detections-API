@@ -23,14 +23,16 @@ class FraudDetectionService
     ) {}
 
     /**
-     * Full fraud detection pipeline:
+     * Full fraud detection pipeline (Hybrid AI):
      * 1. Create/retrieve user profile
-     * 2. Calculate risk score
-     * 3. Generate explanations
-     * 4. Get recommendation
-     * 5. Store transaction
-     * 6. Create alert if flagged
-     * 7. Update user profile
+     * 2. Calculate rule-based risk score
+     * 3. Call Azure OpenAI for AI risk assessment (scoring + classification)
+     * 4. Blend scores: final = (rule * 0.6) + (ai * 0.4)
+     * 5. Generate explanations
+     * 6. Get recommendation
+     * 7. Store transaction
+     * 8. Create alert if flagged
+     * 9. Update user profile
      */
     public function analyzeTransaction(array $data): array
     {
@@ -40,7 +42,7 @@ class FraudDetectionService
         // Step 2: Count recent transactions for velocity check
         $recentTxnCount = $this->transactionRepository->countRecentByUser($data['user_id']);
 
-        // Step 3: Calculate risk score
+        // Step 3: Calculate rule-based risk score
         $riskResult = $this->riskScoringService->calculateRisk(
             amount: (float) $data['amount'],
             location: $data['location'] ?? null,
@@ -50,35 +52,46 @@ class FraudDetectionService
             recentTxnCount: $recentTxnCount,
         );
 
-        $riskScore = $riskResult['risk_score'];
-        $riskLevel = $riskResult['risk_level'];
+        $ruleScore = $riskResult['risk_score'];
         $riskFactors = $riskResult['risk_factors'];
 
-        // Step 4: Generate explanations
-        $transaction = new Transaction($data); // Temp model for explanation context
-        $explanations = $this->explainabilityService->generateExplanations($riskFactors, $transaction, $profile);
-        
-        $azureEnabled = env('AZURE_OPENAI_ENABLED', false);
-        $explanationSource = 'RULE_BASED';
+        // Step 4: AI-Assisted Risk Assessment (NEW — LLM participates in scoring)
+        $transaction = new Transaction($data);
+        $aiAssessment = $this->azureOpenAIService->assessRisk($transaction, $riskFactors, $profile);
 
-        if ($azureEnabled) {
-            try {
-                $aiExplanation = $this->azureOpenAIService->generateExplanation($transaction, $riskFactors, $riskScore, $riskLevel);
-                $explanationSource = 'AZURE_OPENAI';
-            } catch (\Exception $e) {
-                // Fallback to rules if Azure fails
-                $aiExplanation = $this->explainabilityService->generateSummary($explanations, $riskScore, $riskLevel);
-            }
+        $aiRiskScore = $aiAssessment['ai_risk_score'];
+        $aiConfidence = $aiAssessment['confidence'];
+        $fraudType = $aiAssessment['fraud_type'];
+        $aiReasoning = $aiAssessment['reasoning'];
+
+        // Step 5: Blend scores — AI influences the final decision
+        if ($aiRiskScore !== null) {
+            // Hybrid scoring: 60% rule-based + 40% AI
+            $finalScore = min(100, round(($ruleScore * 0.6) + ($aiRiskScore * 0.4), 2));
+            $explanationSource = 'AZURE_OPENAI';
         } else {
-            $aiExplanation = $this->explainabilityService->generateSummary($explanations, $riskScore, $riskLevel);
+            // Fallback: pure rule-based
+            $finalScore = $ruleScore;
+            $explanationSource = 'RULE_BASED';
         }
 
-        // Step 5: Get recommendation
-        $threshold = (float) env('FRAUD_RISK_THRESHOLD', 70);
-        $isFlagged = $riskScore >= $threshold;
-        $recommendation = $this->recommendationService->getRecommendation($riskScore);
+        $riskLevel = $this->getRiskLevel($finalScore);
 
-        // Step 6: Store transaction
+        // Step 6: Generate explanations
+        $explanations = $this->explainabilityService->generateExplanations($riskFactors, $transaction, $profile);
+
+        if ($explanationSource === 'AZURE_OPENAI') {
+            $aiExplanation = $aiReasoning;
+        } else {
+            $aiExplanation = $this->explainabilityService->generateSummary($explanations, $finalScore, $riskLevel);
+        }
+
+        // Step 7: Get recommendation
+        $threshold = (float) env('FRAUD_RISK_THRESHOLD', 70);
+        $isFlagged = $finalScore >= $threshold;
+        $recommendation = $this->recommendationService->getRecommendation($finalScore);
+
+        // Step 8: Store transaction
         $transactionData = [
             'transaction_id' => $data['transaction_id'] ?? 'TXN-' . date('Ymd') . '-' . strtoupper(Str::random(6)),
             'user_id' => $data['user_id'],
@@ -90,7 +103,10 @@ class FraudDetectionService
             'device' => $data['device'] ?? null,
             'device_type' => $data['device_type'] ?? null,
             'ip_address' => $data['ip_address'] ?? null,
-            'risk_score' => $riskScore,
+            'risk_score' => $finalScore,
+            'ai_risk_score' => $aiRiskScore,
+            'ai_confidence' => $aiConfidence,
+            'fraud_type' => $fraudType,
             'risk_level' => $riskLevel,
             'is_flagged' => $isFlagged,
             'is_simulated' => $data['is_simulated'] ?? false,
@@ -102,12 +118,12 @@ class FraudDetectionService
 
         $savedTransaction = $this->transactionRepository->create($transactionData);
 
-        // Step 7: Create alert if flagged
+        // Step 9: Create alert if flagged
         $alert = null;
         if ($isFlagged) {
             $alert = $this->alertRepository->create([
                 'transaction_id' => $savedTransaction->id,
-                'risk_score' => $riskScore,
+                'risk_score' => $finalScore,
                 'risk_level' => $riskLevel,
                 'explanations' => $explanations,
                 'risk_factors' => $riskFactors,
@@ -115,7 +131,7 @@ class FraudDetectionService
             ]);
         }
 
-        // Step 8: Update user profile with this transaction's data
+        // Step 10: Update user profile with this transaction's data
         $this->userProfileRepository->updateWithTransaction(
             $profile,
             (float) $data['amount'],
@@ -123,24 +139,28 @@ class FraudDetectionService
             $data['device'] ?? null,
         );
 
-        // Step 9: Track Insights Event
+        // Step 11: Track Insights Event
         if ($isFlagged) {
             $this->azureInsightsService->trackEvent('fraud_detected', [
                 'transaction_id' => $savedTransaction->id,
                 'amount' => $data['amount'],
                 'user_id' => $data['user_id']
-            ], $riskScore, $riskLevel);
+            ], $finalScore, $riskLevel);
         } else {
             $this->azureInsightsService->trackEvent('normal_transaction', [
                 'transaction_id' => $savedTransaction->id,
                 'amount' => $data['amount'],
-            ], $riskScore, $riskLevel);
+            ], $finalScore, $riskLevel);
         }
 
         // Return result
         return [
             'transaction' => $savedTransaction,
-            'risk_score' => $riskScore,
+            'risk_score' => $finalScore,
+            'rule_score' => $ruleScore,
+            'ai_risk_score' => $aiRiskScore,
+            'ai_confidence' => $aiConfidence,
+            'fraud_type' => $fraudType,
             'risk_level' => $riskLevel,
             'is_flagged' => $isFlagged,
             'recommended_action' => $recommendation['action'],
@@ -149,7 +169,18 @@ class FraudDetectionService
             'explanation_source' => $explanationSource,
             'explanations' => $explanations,
             'risk_factors' => $riskFactors,
+            'scoring_details' => $riskResult['scoring_details'],
             'alert' => $alert,
         ];
+    }
+
+    private function getRiskLevel(float $score): string
+    {
+        return match (true) {
+            $score >= 86 => 'CRITICAL',
+            $score >= 61 => 'HIGH',
+            $score >= 31 => 'MEDIUM',
+            default => 'LOW',
+        };
     }
 }

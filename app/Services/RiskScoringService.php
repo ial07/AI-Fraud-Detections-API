@@ -109,7 +109,19 @@ class RiskScoringService
         $anomalyScore = $this->calculateAnomalyScore($amount, $profile, $isNewDevice, $isUnusualLocation, $isUnusualTime);
 
         // ── Combined Score ──────────────────────────────────────────────
-        $finalScore = min(100, round(0.7 * $anomalyScore + 0.3 * $ruleScore, 2));
+        $combinedScore = round(0.7 * $anomalyScore + 0.3 * $ruleScore, 2);
+
+        // ── Cross-Signal Interaction Multiplier ─────────────────────────
+        // When multiple risk factors co-occur, the danger escalates exponentially
+        $factorCount = count($riskFactors);
+        $multiplier = match (true) {
+            $factorCount >= 4 => 1.7,
+            $factorCount >= 3 => 1.5,
+            $factorCount >= 2 => 1.3,
+            default => 1.0,
+        };
+
+        $finalScore = min(100, round($combinedScore * $multiplier, 2));
 
         // Calculate contribution percentages
         $totalPenalty = array_sum(array_column($riskFactors, 'penalty'));
@@ -128,6 +140,8 @@ class RiskScoringService
                 'anomaly_score' => round($anomalyScore, 2),
                 'rule_weight' => 0.3,
                 'anomaly_weight' => 0.7,
+                'cross_signal_multiplier' => $multiplier,
+                'factor_count' => $factorCount,
             ],
         ];
     }

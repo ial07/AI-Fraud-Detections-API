@@ -135,6 +135,45 @@ class DashboardController extends Controller
         // Simulation stats
         $simulationsRun = InsightsEvent::where('event_type', 'simulation_run')->count();
 
+        // AI Performance Metrics (computed from real transaction data)
+        $totalTransactions = Transaction::count();
+        $aiAssistedCount = Transaction::where('explanation_source', 'AZURE_OPENAI')->count();
+        $avgConfidence = Transaction::whereNotNull('ai_confidence')->avg('ai_confidence');
+        $uniqueFraudTypes = Transaction::whereNotNull('fraud_type')
+            ->where('fraud_type', '!=', 'UNKNOWN')
+            ->where('fraud_type', '!=', 'NORMAL')
+            ->distinct('fraud_type')
+            ->count('fraud_type');
+
+        // Rule vs AI Agreement: compare whether rule-based risk_level would match AI-blended risk_level
+        // We consider them "agreeing" if the AI didn't change the outcome category
+        $agreementCount = 0;
+        $comparisonCount = 0;
+        $aiOverrideCount = 0;
+        $aiTransactions = Transaction::whereNotNull('ai_risk_score')
+            ->whereNotNull('risk_score')
+            ->select('risk_score', 'ai_risk_score')
+            ->limit(200)
+            ->get();
+
+        foreach ($aiTransactions as $t) {
+            $comparisonCount++;
+            $ruleLevel = $this->scoreToLevel((float) $t->risk_score);
+            // Simulate what rule-only score would have been: reverse the blend
+            // final = rule * 0.6 + ai * 0.4 → rule_only = (final - ai*0.4) / 0.6
+            $estimatedRuleOnly = ((float)$t->risk_score - (float)$t->ai_risk_score * 0.4) / 0.6;
+            $ruleOnlyLevel = $this->scoreToLevel(max(0, min(100, $estimatedRuleOnly)));
+            $blendedLevel = $this->scoreToLevel((float) $t->risk_score);
+
+            if ($ruleOnlyLevel === $blendedLevel) {
+                $agreementCount++;
+            } else {
+                $aiOverrideCount++;
+            }
+        }
+
+        $agreementRate = $comparisonCount > 0 ? round(($agreementCount / $comparisonCount) * 100, 1) : 0;
+
         return response()->json([
             'status' => 'success',
             'data' => [
@@ -154,12 +193,32 @@ class DashboardController extends Controller
                     sprintf("Suspicious entities frequently bypass rule-based logic via micro-transactions.")
                 ],
                 'azure_metrics' => [
-                    'total_calls_to_llm' => ($riskDistribution['CRITICAL'] ?? 0) + ($riskDistribution['HIGH'] ?? 0),
+                    'total_calls_to_llm' => $aiAssistedCount,
                     'success_rate' => env('AZURE_OPENAI_ENABLED', false) ? '98.5%' : '0.0%',
                     'fallback_triggered' => env('AZURE_OPENAI_ENABLED', false) ? false : true,
                     'average_latency' => env('AZURE_OPENAI_ENABLED', false) ? '420ms' : '15ms (Local Rule-Engine)'
-                ]
+                ],
+                'ai_performance' => [
+                    'total_transactions' => $totalTransactions,
+                    'ai_assisted' => $aiAssistedCount,
+                    'ai_rate' => $totalTransactions > 0 ? round(($aiAssistedCount / $totalTransactions) * 100, 1) : 0,
+                    'avg_confidence' => $avgConfidence ? round((float) $avgConfidence, 1) : 0,
+                    'fraud_types_detected' => $uniqueFraudTypes,
+                    'agreement_rate' => $agreementRate,
+                    'ai_overrides' => $aiOverrideCount,
+                ],
+                'azure_enabled' => filter_var(env('AZURE_OPENAI_ENABLED', false), FILTER_VALIDATE_BOOLEAN),
             ],
         ]);
+    }
+
+    private function scoreToLevel(float $score): string
+    {
+        return match (true) {
+            $score >= 86 => 'CRITICAL',
+            $score >= 61 => 'HIGH',
+            $score >= 31 => 'MEDIUM',
+            default => 'LOW',
+        };
     }
 }

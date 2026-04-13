@@ -3,6 +3,7 @@
 namespace App\Services;
 
 use App\Models\Transaction;
+use App\Models\UserProfile;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 use Exception;
@@ -149,6 +150,109 @@ class AzureOpenAIService
         } catch (Exception $e) {
             Log::error("Azure OpenAI Explainer Error: " . $e->getMessage());
             return "Failed to contact external Azure OpenAI engines due to a timeout/API issue. Please try again later.";
+        }
+    }
+
+    /**
+     * AI-Assisted Risk Assessment — the LLM actively participates in scoring.
+     * Returns structured JSON with ai_risk_score, confidence, fraud_type, reasoning.
+     */
+    public function assessRisk(Transaction $transaction, array $riskFactors, UserProfile $profile): array
+    {
+        $fallback = [
+            'ai_risk_score' => null,
+            'confidence' => 0,
+            'fraud_type' => 'UNKNOWN',
+            'reasoning' => 'AI assessment unavailable — using rule-based scoring only.',
+        ];
+
+        if (!$this->enabled || empty($this->endpoint) || empty($this->apiKey)) {
+            return $fallback;
+        }
+
+        $url = sprintf(
+            "%s/openai/deployments/%s/chat/completions?api-version=%s",
+            rtrim($this->endpoint, '/'),
+            $this->deployment,
+            $this->apiVersion
+        );
+
+        $systemPrompt = <<<PROMPT
+You are a senior fraud analyst AI engine embedded inside a real-time financial transaction monitoring system.
+
+Your task: Analyze the transaction below and return a structured risk assessment as JSON.
+
+IMPORTANT RULES:
+- ai_risk_score: integer 0-100 (0 = completely safe, 100 = confirmed fraud)
+- confidence: integer 0-100 (how confident you are in your assessment)
+- fraud_type: one of: "ACCOUNT_TAKEOVER", "MONEY_LAUNDERING", "CARD_TESTING", "SUSPICIOUS_TRANSFER", "IDENTITY_FRAUD", "NORMAL"
+- reasoning: 1-2 sentences explaining your assessment
+
+Consider these factors in your analysis:
+- Is the amount abnormal relative to the user's average transaction?
+- Is the location consistent with the user's known locations?
+- Is the device recognized or new?
+- Is the time of transaction unusual?
+- Do multiple risk factors combine to form a dangerous pattern?
+
+Return ONLY valid JSON. No markdown, no extra text.
+PROMPT;
+
+        $riskFactorDescriptions = [];
+        foreach ($riskFactors as $factor) {
+            $riskFactorDescriptions[] = $factor['description'];
+        }
+
+        $userPrompt = json_encode([
+            'transaction_id' => $transaction->transaction_id ?? 'N/A',
+            'amount' => (float) $transaction->amount,
+            'amount_formatted' => 'Rp ' . number_format((float) $transaction->amount, 0, ',', '.'),
+            'location' => $transaction->location ?? 'Unknown',
+            'device' => $transaction->device ?? 'Unknown',
+            'transaction_type' => $transaction->transaction_type ?? 'TRANSFER',
+            'user_avg_amount' => $profile->avg_transaction_amt ?? 0,
+            'user_usual_location' => $profile->usual_location ?? 'Unknown',
+            'user_known_devices' => $profile->known_devices ?? [],
+            'user_total_transactions' => $profile->total_transactions ?? 0,
+            'triggered_risk_factors' => $riskFactorDescriptions,
+        ], JSON_PRETTY_PRINT);
+
+        try {
+            $response = Http::withHeaders([
+                'api-key' => $this->apiKey,
+                'Content-Type' => 'application/json',
+            ])->timeout(6)->retry(1, 300)->post($url, [
+                'messages' => [
+                    ['role' => 'system', 'content' => $systemPrompt],
+                    ['role' => 'user', 'content' => $userPrompt],
+                ],
+                'temperature' => 0.2,
+                'max_tokens' => 200,
+                'response_format' => ['type' => 'json_object'],
+            ]);
+
+            $response->throw();
+
+            $result = $response->json();
+
+            if (isset($result['choices'][0]['message']['content'])) {
+                $parsed = json_decode($result['choices'][0]['message']['content'], true);
+
+                if ($parsed && isset($parsed['ai_risk_score'])) {
+                    return [
+                        'ai_risk_score' => max(0, min(100, (float) $parsed['ai_risk_score'])),
+                        'confidence' => max(0, min(100, (float) ($parsed['confidence'] ?? 50))),
+                        'fraud_type' => $parsed['fraud_type'] ?? 'UNKNOWN',
+                        'reasoning' => $parsed['reasoning'] ?? 'No reasoning provided.',
+                    ];
+                }
+            }
+
+            Log::warning("Azure assessRisk: unexpected response format.");
+            return $fallback;
+        } catch (Exception $e) {
+            Log::error("Azure AI Risk Assessment Error: " . $e->getMessage());
+            return $fallback;
         }
     }
 }
