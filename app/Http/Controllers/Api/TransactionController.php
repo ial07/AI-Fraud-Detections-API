@@ -199,5 +199,49 @@ class TransactionController extends Controller
                 'deep_explanation' => $deepExplanation
             ]
         ]);
+    /**
+     * @OA\Post(
+     *     path="/api/transactions/{id}/analyst-action",
+     *     tags={"Transactions"},
+     *     summary="Submit analyst review decision",
+     *     @OA\RequestBody(
+     *       required=true,
+     *       @OA\JsonContent(
+     *         required={"action"},
+     *         @OA\Property(property="action", type="string", enum={"FALSE_POSITIVE", "CONFIRMED_FRAUD"})
+     *       )
+     *     ),
+     *     @OA\Response(response=200, description="Analyst action recorded")
+     * )
+     */
+    public function analystAction(int $id, Request $request): JsonResponse
+    {
+        $validated = $request->validate([
+            'action' => 'required|string|in:FALSE_POSITIVE,CONFIRMED_FRAUD',
+        ]);
+
+        $transaction = $this->transactionRepository->findById($id);
+
+        if (!$transaction) {
+            return response()->json([
+                'status' => 'error',
+                'message' => 'Transaction not found',
+            ], 404);
+        }
+
+        $transaction->analyst_status = $validated['action'];
+        $transaction->save();
+        
+        // Track the metric
+        app(\App\Services\AzureInsightsService::class)->trackEvent('analyst_review', [
+            'transaction_id' => $transaction->id,
+            'decision' => $validated['action']
+        ], $transaction->risk_score, $transaction->risk_level);
+
+        return response()->json([
+            'status' => 'success',
+            'message' => 'Analyst action recorded',
+            'data' => $transaction
+        ]);
     }
 }

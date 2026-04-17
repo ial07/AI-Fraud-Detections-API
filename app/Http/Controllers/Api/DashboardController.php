@@ -184,6 +184,20 @@ class DashboardController extends Controller
 
         $agreementRate = $comparisonCount > 0 ? round(($agreementCount / $comparisonCount) * 100, 1) : 0;
 
+        $threshold = (float) env('FRAUD_RISK_THRESHOLD', 70);
+        $totalValueProtected = Transaction::where('is_flagged', true)
+            ->whereNotNull('ai_risk_score')
+            ->get()
+            ->filter(function($t) use ($threshold) {
+                $estimatedRuleOnly = ((float)$t->risk_score - (float)$t->ai_risk_score * 0.4) / 0.6;
+                return $estimatedRuleOnly < $threshold;
+            })
+            ->sum('amount');
+
+        $falsePositiveCount = Transaction::where('analyst_status', 'FALSE_POSITIVE')->count();
+        $totalFlagged = Transaction::where('is_flagged', true)->count();
+        $fprRate = $totalFlagged > 0 ? round(($falsePositiveCount / $totalFlagged) * 100, 1) : 0.0;
+
         return response()->json([
             'status' => 'success',
             'data' => [
@@ -216,6 +230,8 @@ class DashboardController extends Controller
                     'fraud_types_detected' => $uniqueFraudTypes,
                     'agreement_rate' => $agreementRate,
                     'ai_overrides' => $aiOverrideCount,
+                    'value_protected' => $totalValueProtected,
+                    'false_positive_rate' => $fprRate,
                 ],
                 'azure_enabled' => filter_var(env('AZURE_OPENAI_ENABLED', false), FILTER_VALIDATE_BOOLEAN),
             ],

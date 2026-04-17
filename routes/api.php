@@ -21,6 +21,7 @@ Route::post('/transactions', [TransactionController::class, 'store']);
 Route::get('/transactions', [TransactionController::class, 'index']);
 Route::get('/transactions/{id}', [TransactionController::class, 'show']);
 Route::post('/transactions/{id}/explain', [TransactionController::class, 'explain']);
+Route::post('/transactions/{id}/analyst-action', [TransactionController::class, 'analystAction']);
 
 // Fraud Alerts
 Route::get('/alerts', [AlertController::class, 'index']);

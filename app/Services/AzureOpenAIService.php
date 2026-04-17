@@ -218,14 +218,23 @@ PROMPT;
         ], JSON_PRETTY_PRINT);
 
         try {
+            $messages = [
+                ['role' => 'system', 'content' => $systemPrompt],
+                // Few-shot Example 1: Clear Fraud
+                ['role' => 'user', 'content' => json_encode(['amount' => 50000000, 'location' => 'Moscow, Russia', 'user_usual_location' => 'Jakarta', 'triggered_risk_factors' => ['Abnormal amount', 'High risk locale']])],
+                ['role' => 'assistant', 'content' => json_encode(['ai_risk_score' => 95, 'confidence' => 99, 'fraud_type' => 'ACCOUNT_TAKEOVER', 'reasoning' => 'Attempted massive transfer from an unverified high-risk international IP far from user\'s usual location.'])],
+                // Few-shot Example 2: Safe
+                ['role' => 'user', 'content' => json_encode(['amount' => 150000, 'location' => 'Jakarta, Indonesia', 'user_usual_location' => 'Jakarta', 'triggered_risk_factors' => []])],
+                ['role' => 'assistant', 'content' => json_encode(['ai_risk_score' => 5, 'confidence' => 95, 'fraud_type' => 'NORMAL', 'reasoning' => 'Transaction pattern aligns perfectly with historical baseline values and trusted locations.'])],
+                // Actual user payload
+                ['role' => 'user', 'content' => $userPrompt],
+            ];
+
             $response = Http::withHeaders([
                 'api-key' => $this->apiKey,
                 'Content-Type' => 'application/json',
             ])->timeout(6)->retry(1, 300)->post($url, [
-                'messages' => [
-                    ['role' => 'system', 'content' => $systemPrompt],
-                    ['role' => 'user', 'content' => $userPrompt],
-                ],
+                'messages' => $messages,
                 'temperature' => 0.2,
                 'max_tokens' => 200,
                 'response_format' => ['type' => 'json_object'],
