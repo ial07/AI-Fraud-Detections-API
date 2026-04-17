@@ -199,6 +199,8 @@ class TransactionController extends Controller
                 'deep_explanation' => $deepExplanation
             ]
         ]);
+    }
+    
     /**
      * @OA\Post(
      *     path="/api/transactions/{id}/analyst-action",
