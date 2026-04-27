@@ -190,7 +190,6 @@ Ready to see AI fraud detection in action?
 
 - **Email**: ialilham77@gmail.com
 - **Website**: [ILHAM MALIK](https://ial-porto.vercel.app/)
-- **Documentation**: [API Docs](https://docs.frauddetectionapi.com)
 
 ---
 
