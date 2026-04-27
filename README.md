@@ -188,9 +188,8 @@ if ($assessment->risk_score > 0.75) {
 
 Ready to see AI fraud detection in action?
 
-- **Schedule Demo**: [calendly.com/frauddetection](https://calendly.com)
-- **Email**: info@frauddetectionapi.com
-- **Website**: www.frauddetectionapi.com
+- **Email**: ialilham77@gmail.com
+- **Website**: [ILHAM MALIK](https://ial-porto.vercel.app/)
 - **Documentation**: [API Docs](https://docs.frauddetectionapi.com)
 
 ---
